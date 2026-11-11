@@ -71,7 +71,7 @@
 
   /* ---------------- storage ---------------- */
   const KEY = "bimduo_store_v1";
-  const DEFAULT_STORE = { xp: 0, done: {}, levels: {}, mistakes: [], attempts: 0, correctTotal: 0, bestStreak: 0, sound: true };
+  const DEFAULT_STORE = { xp: 0, done: {}, levels: {}, unlocked: {}, adminPass: "", mistakes: [], attempts: 0, correctTotal: 0, bestStreak: 0, sound: true };
   let store = loadStore();
 
   function loadStore() {
@@ -140,9 +140,12 @@
   function levelBest(id) {
     return store.levels ? (store.levels[id] || 0) : 0;
   }
+  function isForcedOpen(id) {
+    return !!(store.unlocked && store.unlocked[id]);
+  }
   function levelUnlocked(i) {
     if (i <= 0) return true;
-    return hasLevel(LEVELS[i - 1].id);
+    return hasLevel(LEVELS[i - 1].id) || isForcedOpen(LEVELS[i].id);
   }
   function firstIncomplete() {
     return LEVELS.findIndex(l => !hasLevel(l.id));
@@ -171,7 +174,7 @@
       const current = unlocked && !done && i === cur;
       const best = levelBest(lv.id);
       const secLabel = lv.kind === "test" ? "Итог" : lv.section;
-      return `<div class="path-row" style="--off:${OFF[LEVELS.filter(l => l.variant === variant).indexOf(lv)]}">
+      return `<div class="path-row ${unlocked ? "clickable" : ""}" data-row="${lv.id}" style="--off:${OFF[LEVELS.filter(l => l.variant === variant).indexOf(lv)]}">
         <div class="node-wrap">
           ${current ? `<span class="start-bubble">Начать</span>` : ""}
           <button class="node ${done ? "done" : ""} ${unlocked ? "" : "locked"} ${current ? "current" : ""} ${lv.kind}"
@@ -196,6 +199,7 @@
         <div class="top-actions">
           <div class="pill"><span class="pill-ico">🔥</span><b>${store.bestStreak}</b></div>
           <div class="pill"><span class="pill-ico">⚡</span><b>${store.xp}</b> XP</div>
+          <button class="icon-btn" id="adminBtn" title="Админ-панель">🔑</button>
           <button class="icon-btn" id="soundBtn" title="Звук">${store.sound ? "🔊" : "🔇"}</button>
         </div>
       </div>
@@ -216,6 +220,8 @@
     if (a) a.addEventListener("click", () => { ansQuery = ""; ansFilter = "all"; ansSection = "all"; renderAnswers(); });
     const s = document.getElementById("soundBtn");
     if (s) s.addEventListener("click", () => { store.sound = !store.sound; saveStore(); rerender(); });
+    const adm = document.getElementById("adminBtn");
+    if (adm) adm.addEventListener("click", openAdmin);
   }
 
   /* ================= ГЛАВНЫЙ ЭКРАН ================= */
@@ -324,10 +330,10 @@
     document.querySelectorAll("[data-mode]").forEach(btn => {
       btn.addEventListener("click", () => startMode(btn.dataset.mode));
     });
-    document.querySelectorAll("[data-level]").forEach(btn => {
-      btn.addEventListener("click", () => {
-        const lv = LEVELS.find(l => l.id === btn.dataset.level);
-        if (lv && !btn.disabled) startLevel(lv);
+    document.querySelectorAll(".path-row.clickable").forEach(row => {
+      row.addEventListener("click", () => {
+        const lv = LEVELS.find(l => l.id === row.dataset.row);
+        if (lv) startLevel(lv);
       });
     });
     bindChrome(renderHome);
@@ -437,6 +443,236 @@
     if (cnt) cnt.textContent = `Найдено: ${found} из 80`;
   }
 
+  /* ================= АДМИН-ПАНЕЛЬ ================= */
+  const ADMIN_PASS_DEFAULT = "bim2026";
+
+  function adminPass() {
+    return store.adminPass || ADMIN_PASS_DEFAULT;
+  }
+  function adminAuthed() {
+    try { return sessionStorage.getItem("bimduo_admin") === "1"; }
+    catch (e) { return false; }
+  }
+  function setAdminAuthed(on) {
+    try {
+      if (on) sessionStorage.setItem("bimduo_admin", "1");
+      else sessionStorage.removeItem("bimduo_admin");
+    } catch (e) { /* приватный режим: вход только на текущий экран */ }
+  }
+  function clampPct(v) {
+    const n = Math.round(Number(v));
+    if (!Number.isFinite(n)) return 0;
+    return Math.max(0, Math.min(100, n));
+  }
+
+  function openAdmin() {
+    if (adminAuthed()) renderAdmin();
+    else showAdminLogin();
+  }
+
+  function showAdminLogin() {
+    const overlay = document.createElement("div");
+    overlay.className = "overlay";
+    overlay.innerHTML = `
+      <form class="modal admin-login" id="adminForm" autocomplete="off">
+        <div class="modal-emoji">🔑</div>
+        <h3>Админ-панель</h3>
+        <p>Пароль нужен, чтобы открыть уровни, которые уже проходил.</p>
+        <input class="modal-input" id="adminPassInput" type="password" placeholder="Пароль" aria-label="Пароль">
+        <div class="modal-error" id="adminPassError" hidden>Неверный пароль</div>
+        <div class="modal-actions">
+          <button class="btn btn-secondary" type="button" id="adminCancel">Отмена</button>
+          <button class="btn btn-primary" type="submit">Войти</button>
+        </div>
+      </form>`;
+    document.body.appendChild(overlay);
+    const form = document.getElementById("adminForm");
+    const input = document.getElementById("adminPassInput");
+    const err = document.getElementById("adminPassError");
+    input.focus();
+
+    form.addEventListener("submit", e => {
+      e.preventDefault();
+      if (input.value === adminPass()) {
+        setAdminAuthed(true);
+        overlay.remove();
+        renderAdmin();
+        return;
+      }
+      err.hidden = false;
+      input.value = "";
+      input.focus();
+      overlay.classList.add("shake");
+      setTimeout(() => overlay.classList.remove("shake"), 400);
+    });
+    document.getElementById("adminCancel").addEventListener("click", () => overlay.remove());
+    overlay.addEventListener("click", e => { if (e.target === overlay) overlay.remove(); });
+  }
+
+  function adminStatusText(lv, done, unlocked) {
+    if (done) return `пройден · ${levelBest(lv.id)}%`;
+    if (isForcedOpen(lv.id)) return "открыт вручную";
+    return unlocked ? "открыт" : "закрыт";
+  }
+
+  function adminLevelRow(lv) {
+    const done = hasLevel(lv.id);
+    const forced = isForcedOpen(lv.id);
+    const unlocked = levelUnlocked(LEVELS.indexOf(lv));
+    const title = lv.kind === "test" ? "🏁 Итог · Тест варианта" : `${lv.ico} ${lv.section} · ${lv.title}`;
+    return `<div class="admin-row" data-row="${lv.id}">
+      <div class="admin-row-main">
+        <div class="admin-row-title">${title}</div>
+        <div class="admin-row-status">${adminStatusText(lv, done, unlocked)}</div>
+      </div>
+      <div class="admin-row-controls">
+        <label class="admin-check" title="Уровень считается сданным">
+          <input type="checkbox" data-done="${lv.id}" ${done ? "checked" : ""}>
+          <span>Пройден</span>
+        </label>
+        <input class="admin-pct" type="number" min="0" max="100" step="5" value="${done ? levelBest(lv.id) : 100}"
+          data-pct="${lv.id}" ${done ? "" : "disabled"} aria-label="Процент за уровень">
+        <label class="admin-check" title="Просто снять замок, не отмечая уровень пройденным">
+          <input type="checkbox" data-open="${lv.id}" ${forced ? "checked" : ""}>
+          <span>Доступ</span>
+        </label>
+      </div>
+    </div>`;
+  }
+
+  function refreshAdminRow() {
+    const y = window.scrollY;
+    renderAdmin();
+    const root = document.documentElement;
+    const prev = root.style.scrollBehavior;
+    root.style.scrollBehavior = "auto";
+    window.scrollTo(0, y);
+    root.style.scrollBehavior = prev;
+  }
+
+  function adminSummaryText() {
+    const done = LEVELS.filter(l => hasLevel(l.id)).length;
+    const forced = LEVELS.filter(l => !hasLevel(l.id) && isForcedOpen(l.id)).length;
+    return `Пройдено уровней: ${done} из ${LEVELS.length}${forced ? ` · открыто вручную: ${forced}` : ""}`;
+  }
+
+  function bindAdminRows(root) {
+    const scope = root || document;
+
+    scope.querySelectorAll("[data-done]").forEach(box => {
+      box.addEventListener("change", () => {
+        const id = box.dataset.done;
+        if (box.checked) {
+          const field = document.querySelector(`[data-pct="${id}"]`);
+          store.levels[id] = clampPct(field ? field.value : 100);
+        } else {
+          delete store.levels[id];
+        }
+        saveStore();
+        refreshAdminRow(id);
+      });
+    });
+
+    scope.querySelectorAll("[data-pct]").forEach(field => {
+      field.addEventListener("change", () => {
+        const id = field.dataset.pct;
+        if (!hasLevel(id)) return;
+        store.levels[id] = clampPct(field.value);
+        saveStore();
+        refreshAdminRow(id);
+      });
+    });
+
+    scope.querySelectorAll("[data-open]").forEach(box => {
+      box.addEventListener("change", () => {
+        const id = box.dataset.open;
+        store.unlocked = store.unlocked || {};
+        if (box.checked) store.unlocked[id] = true;
+        else delete store.unlocked[id];
+        saveStore();
+        refreshAdminRow(id);
+      });
+    });
+  }
+
+  function renderAdmin() {
+    session = null; Q = null;
+    const groups = [["v1", "Вариант 1"], ["v2", "Вариант 2"]];
+    app.innerHTML = `
+      ${topbarHTML()}
+      <main class="answers admin-view">
+        ${tabsHTML("course")}
+
+        <div class="answers-head">
+          <div class="eyebrow">Режим учителя</div>
+          <h1>Админ-панель</h1>
+          <p>Отмечай темы, которые уже проходил. «Пройден» засчитывает уровень с процентом и открывает следующие, «Доступ» просто снимает замок. Всё сохраняется в этом браузере.</p>
+          <div class="admin-toolbar">
+            <button class="btn btn-secondary" id="adminAllDone">Отметить всё пройденным</button>
+            <button class="btn btn-secondary" id="adminOpenAll">Открыть все уровни</button>
+            <button class="btn btn-ghost" id="adminResetLevels">Сбросить уровни</button>
+            <button class="btn btn-ghost" id="adminLogout">Выйти</button>
+          </div>
+          <div class="admin-summary">${adminSummaryText()}</div>
+        </div>
+
+        ${groups.map(([key, label]) => `
+          <section class="admin-group">
+            <div class="ans-group-title">${label}</div>
+            ${LEVELS.filter(l => l.variant === key).map(adminLevelRow).join("")}
+          </section>`).join("")}
+
+        <section class="admin-group">
+          <div class="ans-group-title">Пароль</div>
+          <div class="admin-pass-row">
+            <input class="ans-search admin-pass-input" id="newPass" type="text" placeholder="Новый пароль" autocomplete="off">
+            <button class="btn btn-secondary" id="savePass">Сохранить пароль</button>
+          </div>
+          <p class="admin-hint" id="passMsg">Сейчас действует ${store.adminPass ? "твой пароль" : `стандартный пароль <b>${ADMIN_PASS_DEFAULT}</b>`}. Минимум 4 символа.</p>
+        </section>
+      </main>`;
+
+    bindChrome(renderAdmin);
+    bindAdminRows(document);
+
+    document.getElementById("adminAllDone").addEventListener("click", () => {
+      LEVELS.forEach(l => { store.levels[l.id] = 100; });
+      saveStore();
+      renderAdmin();
+    });
+    document.getElementById("adminOpenAll").addEventListener("click", () => {
+      store.unlocked = store.unlocked || {};
+      LEVELS.forEach(l => { store.unlocked[l.id] = true; });
+      saveStore();
+      renderAdmin();
+    });
+    document.getElementById("adminResetLevels").addEventListener("click", () => {
+      store.levels = {};
+      store.unlocked = {};
+      saveStore();
+      renderAdmin();
+    });
+    document.getElementById("adminLogout").addEventListener("click", () => {
+      setAdminAuthed(false);
+      renderHome();
+    });
+    document.getElementById("savePass").addEventListener("click", () => {
+      const field = document.getElementById("newPass");
+      const msg = document.getElementById("passMsg");
+      const value = field.value.trim();
+      if (value.length < 4) {
+        msg.innerHTML = "Пароль слишком короткий: нужно минимум 4 символа.";
+        field.focus();
+        return;
+      }
+      store.adminPass = value;
+      saveStore();
+      field.value = "";
+      msg.innerHTML = "Пароль обновлён. Запомни его — восстановить нельзя, только задать новый.";
+      setAdminAuthed(true);
+    });
+  }
+
   /* ================= ЗАПУСК КОЛОДЫ ================= */
   function startMode(mode) {
     if (mode === "v1") { newSession(V1.tasks, "Вариант 1", "v1"); }
@@ -479,11 +715,30 @@
     renderQuiz();
   }
 
+  /* Резервный сборщик среза: если exam.js не подключён или упал,
+     всё равно собираем по 5 заданий каждого раздела, без повторов. */
+  function fallbackExamDeck(pool, history) {
+    const deck = ["1.1", "1.2", "1.3", "1.4"].flatMap(section => {
+      const available = pool.filter(t => t.section === section);
+      const used = (history[section] || []).flat().filter(id => available.some(t => t.id === id));
+      let unseen = available.filter(t => !used.includes(t.id));
+      if (unseen.length < 5) unseen = shuffle(available);
+      return unseen.slice(0, 5);
+    });
+    return deck;
+  }
+
   function startExam(variant, levelId) {
     const pool = variant === "v1" ? V1.tasks : variant === "v2" ? V2.tasks : ALL;
     store.examHistory = store.examHistory || {};
     const key = variant || "mixed";
-    const result = window.BIMExam.build(pool, store.examHistory[key] || {});
+    let result;
+    try {
+      result = window.BIMExam.build(pool, store.examHistory[key] || {});
+    } catch (e) {
+      const deck = fallbackExamDeck(pool, store.examHistory[key] || {});
+      result = { deck, history: store.examHistory[key] || {} };
+    }
     store.examHistory[key] = result.history;
     saveStore();
     newSession(result.deck, "Итоговый · " + (variant === "v1" ? "вариант 1" : variant === "v2" ? "вариант 2" : "оба варианта"), "test");
@@ -722,7 +977,7 @@
   function openHTML() {
     return `
       <textarea class="notes" id="notes" aria-label="Ваш развёрнутый ответ" ${Q.checked || Q.revealed ? "readonly" : ""} placeholder="Напишите ответ своими словами…">${esc(Q.draft)}</textarea>
-      <div class="hint">${session.exam ? "Ответ сохранится для сравнения с эталоном после сдачи. Автоматической смысловой оценки нет." : "Напишите ответ, затем сравните с эталоном. Самопроверка: важен смысл, а не дословное совпадение."}</div>
+      <div class="hint">${session.exam ? "Напиши ответ или нажми «Пропустить». Эталон и разбор будут после сдачи." : "Напишите ответ, затем сравните с эталоном. Самопроверка: важен смысл, а не дословное совпадение."}</div>
       <div id="answerZone"></div>`;
   }
 
@@ -755,7 +1010,12 @@
 
     if (t.type === "open") {
       if (session.exam) {
-        bar.innerHTML = `<button class="btn btn-primary" id="submitOpen" ${Q.draft.trim().length ? "" : "disabled"}>Сохранить ответ</button>`;
+        const hasText = Q.draft.trim().length > 0;
+        bar.innerHTML = `<div class="two-btns">
+          <button class="btn btn-secondary" id="skipOpen">Пропустить</button>
+          <button class="btn btn-primary" id="submitOpen" ${hasText ? "" : "disabled"}>Сохранить ответ</button>
+        </div>`;
+        document.getElementById("skipOpen").addEventListener("click", () => { Q.draft = ""; finish(null); });
         document.getElementById("submitOpen").addEventListener("click", () => finish(null));
         return;
       }
@@ -968,23 +1228,33 @@
       <p>Сравни смысл и полноту ответа с эталоном. Это самооценка, не автоматическая проверка преподавателем.</p>
       ${open.map(response => {
         const t = BY_ID[response.id];
+        const skipped = !String(response.draft || "").trim();
         return `<article class="ans-item"><h2>${esc(t.prompt)}</h2>
-          <div class="ans-a-label">Твой ответ</div><p class="saved-draft">${esc(response.draft)}</p>
+          <div class="ans-a-label">Твой ответ</div><p class="saved-draft">${skipped ? "<i>Пропущено</i>" : esc(response.draft)}</p>
           <div class="ans-a-label">Эталон</div><p>${esc(t.answer)}</p><p class="hint">${esc(t.explain)}</p>
           <label class="self-grade">Оценка ответа <select data-grade="${t.id}">
             <option value="">Выбери оценку</option><option value="yes">Верно: все ключевые пункты есть</option>
-            <option value="no">Неполно / неверно: повторить</option></select></label></article>`;
+            <option value="no"${skipped ? " selected" : ""}>Неполно / неверно: повторить</option></select></label></article>`;
       }).join("")}
       <div class="review-actions">
         <button class="btn btn-primary" id="completeExam" disabled>Получить результат</button>
+        <button class="btn btn-secondary" id="skipReview">Оценить без проверки</button>
         <button class="btn btn-ghost" id="exitReview">На главную</button>
       </div></main>`;
     const selects = [...document.querySelectorAll("[data-grade]")];
-    selects.forEach(select => select.addEventListener("change", () => {
-      document.getElementById("completeExam").disabled = selects.some(item => !item.value);
-    }));
+    const completeBtn = document.getElementById("completeExam");
+    const syncComplete = () => { completeBtn.disabled = selects.some(item => !item.value); };
+    selects.forEach(select => select.addEventListener("change", syncComplete));
+    syncComplete();
     document.getElementById("completeExam").addEventListener("click", () => {
       selects.forEach(select => { session.responses.find(response => response.id === select.dataset.grade).ok = select.value === "yes"; });
+      renderResult();
+    });
+    document.getElementById("skipReview").addEventListener("click", () => {
+      selects.forEach(select => {
+        if (!select.value) select.value = "no";
+        session.responses.find(response => response.id === select.dataset.grade).ok = select.value === "yes";
+      });
       renderResult();
     });
     document.getElementById("exitReview").addEventListener("click", askExit);
